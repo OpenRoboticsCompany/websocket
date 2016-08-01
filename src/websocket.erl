@@ -65,21 +65,37 @@ bind(WebSocket,Module,Function) ->
 init({ Listen, Module, Function }) ->
 	%% accept the socket in this process
 %	case gen_tcp:accept(Listen) of
+	io:format("accepting socket~n"),
 	case ssl:transport_accept(Listen) of
 		{ ok, Socket } -> 
-			ok = ssl:accept(Socket),
-			%% if we get a socket, wait for the headers
-			wait_headers(self(), <<"">>),
-			{ ok, #websocket{ 
-				uuid = uuid:id(), 
-				socket = Socket, 
-				headers = [], 
-				data = [],
-				module = Module,
-				function = Function,
-				connecting = true
-			}};
-		{ error, closed } ->
+			io:format("socket accepted~n"),
+			case ssl:ssl_accept(Socket, 5000) of 
+				ok -> 
+					%% if we get a socket, wait for the headers
+					io:format("setting socket to active~n"),
+			%		case inet:setopts(Socket,[{active,true }]) of
+			%			ok ->
+			%				io:format("set active~n");	
+			%			{ error, Reason } ->
+			%				io:fromat("failed to set active ~p~n", [ Reason ])
+			%		end,
+					io:format("got socket, waiting for headers~n"),
+					wait_headers(self(), <<>>),
+					{ ok, #websocket{ 
+						uuid = uuid:id(), 
+						socket = Socket, 
+						headers = [], 
+						data = <<>>,
+						module = Module,
+						function = Function,
+						connecting = true
+					}};
+				{ error, Reason } ->
+					io:format(" failed to make ssl connection ~p~n", [ Reason ]),
+					{ stop, closed }
+			end;
+		{ error, Reason } ->
+			io:format(" got errot ~p~n", [ Reason ]),
 			%% if we don't get a socket, just bail!
 			{ stop, closed }
 	end.
@@ -116,6 +132,7 @@ handle_cast( stop, WebSocket ) ->
 	{ stop, normal, WebSocket };
 
 handle_cast({ wait_headers, Seen }, WebSocket) ->
+	io:format("waiting for headers~n"),
 	{ noreply, WebSocket#websocket{ data = Seen, connecting = true }};
 
 handle_cast({ upgrade, Data }, WebSocket = #websocket{ socket = Socket, module = Module, function = Function }) ->
@@ -141,7 +158,7 @@ handle_cast({ upgrade, Data }, WebSocket = #websocket{ socket = Socket, module =
 				protocol = Protocol,
 				handler = Protocol:handler(self(),Socket),
 				headers = Headers, 
-				data = [],
+				data = <<>>,
 				connecting = false
 			}};
 		{ error, Reason } ->	
@@ -149,8 +166,7 @@ handle_cast({ upgrade, Data }, WebSocket = #websocket{ socket = Socket, module =
 			{ stop, handshake_failed, WebSocket }
 	end.
 
-handle_info({tcp, _Socket, Data}, WebSocket = #websocket{ connecting = true, data = Seen }) ->
-	io:format("Received request[~p]~n", [ Data ]),
+handle_info({ssl, _Socket, Data}, WebSocket = #websocket{ connecting = true, data = Seen }) ->
 	case contains_blank_line(<<Seen/binary,Data/binary>>) of
 		yes -> 
 			upgrade(self(),<<Seen/binary,Data/binary>>),
@@ -160,7 +176,7 @@ handle_info({tcp, _Socket, Data}, WebSocket = #websocket{ connecting = true, dat
 			{ noreply, WebSocket }
 	end;	
 
-handle_info({tcp_closed, Socket }, WebSocket = #websocket{ data = Seen, connecting = true }) ->
+handle_info({ssl_closed, Socket }, WebSocket = #websocket{ data = Seen, connecting = true }) ->
 	io:format("Closed socket ~p with data ~p ~n", [ Socket, Seen ]),
 	{ stop, normal, WebSocket };
 
@@ -192,11 +208,11 @@ handle_info({ close, _Socket }, WebSocket = #websocket{ }) ->
 	timer:apply_after(1000, ?MODULE, stop, [ self() ]),
 	{ noreply, WebSocket };
 
-handle_info({tcp, Socket, NewData}, WebSocket = #websocket{ handler = Handler, socket = Socket }) ->
+handle_info({ssl, Socket, NewData}, WebSocket = #websocket{ handler = Handler, socket = Socket }) ->
 	Handler ! NewData,
 	{ noreply, WebSocket };
 
-handle_info({tcp_closed, _Socket }, WebSocket = #websocket{ module = Module, function = Function}) ->
+handle_info({ssl_closed, _Socket }, WebSocket = #websocket{ module = Module, function = Function}) ->
 	spawn(Module,Function,[self(),closed]),
 	timer:apply_after(1000, ?MODULE, stop, [ self() ]),
 	{ noreply, WebSocket };
